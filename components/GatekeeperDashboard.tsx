@@ -1,8 +1,8 @@
 'use client';
 
-import React, { useState } from 'react';
-import Navbar from './Navbar';
-import ApiKeyModal from './ApiKeyModal';
+import React, { useState, useEffect } from 'react';
+import Link from 'next/link';
+import { usePathname } from 'next/navigation';
 import { evaluateGatekeeper } from '../lib/similarity/cosine-sim';
 
 interface LogEntry {
@@ -15,10 +15,11 @@ interface LogEntry {
 }
 
 export default function GatekeeperDashboard() {
-  const [isModalOpen, setIsModalOpen] = useState(false);
+  const pathname = usePathname();
+  const [isModalOpen, setIsModalOpen] = useState<boolean>(false);
   const [apiKey, setApiKey] = useState<string>('');
   const [threshold, setThreshold] = useState<number>(0.90);
-  const [inputPrompt, setInputPrompt] = useState<string>('How can I optimize Next.js ISR on Google Cloud?');
+  const [inputPrompt, setInputPrompt] = useState<string>('How to optimize Next.js ISR on Google Cloud Run?');
   const [cachedPrompt, setCachedPrompt] = useState<string>('Techniques for optimizing Next.js ISR on Cloud Run');
   const [cachedNodeId, setCachedNodeId] = useState<string>('vector_d14c');
   const [similarityScore, setSimilarityScore] = useState<number>(0.924);
@@ -57,49 +58,192 @@ export default function GatekeeperDashboard() {
     },
   ]);
 
-  const handleSimulate = () => {
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      const stored = localStorage.getItem('GEMINI_API_KEY');
+      if (stored) setApiKey(stored);
+    }
+  }, []);
+
+  const handleSaveApiKey = () => {
+    if (typeof window !== 'undefined') {
+      localStorage.setItem('GEMINI_API_KEY', apiKey.trim());
+    }
+    setIsModalOpen(false);
+  };
+
+  const handleExecuteQuery = async () => {
+    if (!inputPrompt.trim()) return;
     setIsLoading(true);
-    setTimeout(() => {
-      const randomSim = parseFloat((0.70 + Math.random() * 0.28).toFixed(3));
-      setSimilarityScore(randomSim);
 
-      const decision = evaluateGatekeeper(randomSim, threshold);
-      setAction(decision.action);
+    try {
+      const gateRes = await fetch('/api/gatekeeper', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ prompt: inputPrompt, threshold, engine }),
+      });
+      const gateData = await gateRes.json();
 
-      const computedTtfb = decision.action === 'CACHE_HIT' ? 140 : engine === 'cloud' ? 3120 : 1850;
-      setTtfb(computedTtfb);
+      if (!gateData.success) {
+        setIsLoading(false);
+        return;
+      }
 
-      if (decision.action === 'CACHE_BUST') {
+      setSimilarityScore(gateData.decision.similarity);
+      setAction(gateData.decision.action);
+      setTtfb(gateData.ttfbMs);
+
+      let finalContent = gateData.responseContent;
+
+      if (gateData.decision.action === 'CACHE_BUST') {
+        const storedKey = apiKey || (typeof window !== 'undefined' ? localStorage.getItem('GEMINI_API_KEY') || '' : '');
+        
+        if (storedKey && engine === 'cloud') {
+          try {
+            const geminiRes = await fetch('/api/gemini', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ prompt: inputPrompt, apiKey: storedKey }),
+            });
+            const geminiData = await geminiRes.json();
+            if (geminiData.success && geminiData.text) {
+              finalContent = geminiData.text;
+              setTtfb(geminiData.durationMs);
+            }
+          } catch (geminiErr) {
+            console.warn('Gemini inference fallback:', geminiErr);
+          }
+        }
+
         setCachedNodeId(`vector_${Math.random().toString(36).substring(2, 6)}`);
         setCachedPrompt(inputPrompt);
-        setResponseOutput(`[Fresh Inference Generated via ${engine.toUpperCase()}]: Cache revalidated for query: "${inputPrompt}".`);
       }
+
+      setResponseOutput(finalContent);
 
       const newLog: LogEntry = {
         id: Date.now().toString(),
         time: new Date().toLocaleTimeString(),
         query: inputPrompt,
-        similarity: randomSim,
-        action: decision.action,
-        ttfb: computedTtfb,
+        similarity: gateData.decision.similarity,
+        action: gateData.decision.action,
+        ttfb: gateData.ttfbMs,
       };
 
       setLogs((prev) => [newLog, ...prev.slice(0, 4)]);
+    } catch (err) {
+      console.error('Execution failed:', err);
+    } finally {
       setIsLoading(false);
-    }, 250);
+    }
   };
 
   return (
-    <div className="min-h-screen bg-[#070b14] text-slate-100 p-8 font-sans antialiased">
-      <Navbar onOpenApiKeyModal={() => setIsModalOpen(true)} />
-      <ApiKeyModal
-        isOpen={isModalOpen}
-        onClose={() => setIsModalOpen(false)}
-        onKeySaved={(key) => setApiKey(key)}
-      />
+    <div className="min-h-screen bg-[#070b14] text-slate-100 p-8 font-sans antialiased relative">
+      {/* API Key Modal Popup */}
+      {isModalOpen && (
+        <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/80 backdrop-blur-md p-4">
+          <div className="w-full max-w-md bg-[#0b101b] border border-slate-700 rounded-2xl p-6 shadow-2xl space-y-4">
+            <div className="flex justify-between items-center">
+              <h3 className="text-sm font-bold text-sky-400 font-mono uppercase tracking-wider">
+                🔑 Gemini API Gate Key
+              </h3>
+              <button
+                onClick={() => setIsModalOpen(false)}
+                className="text-slate-400 hover:text-slate-100 text-sm font-mono px-2 py-1"
+              >
+                ✕
+              </button>
+            </div>
 
+            <p className="text-xs text-slate-400 leading-relaxed">
+              Enter your Google AI Studio key for live <b>Gemini 2.5 Flash</b> inference executions. Saved locally in your browser.
+            </p>
+
+            <input
+              type="password"
+              value={apiKey}
+              onChange={(e) => setApiKey(e.target.value)}
+              placeholder="AIzaSy..."
+              className="w-full bg-slate-950 border border-slate-700 rounded-xl px-4 py-2.5 text-xs font-mono text-slate-200 focus:outline-none focus:border-sky-500"
+            />
+
+            <div className="flex gap-3 justify-end pt-2">
+              <button
+                type="button"
+                onClick={() => setIsModalOpen(false)}
+                className="px-4 py-2 text-xs font-mono text-slate-400 hover:text-slate-200"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={handleSaveApiKey}
+                className="px-4 py-2 bg-sky-600 hover:bg-sky-500 text-white rounded-xl text-xs font-mono font-semibold transition"
+              >
+                Save Key
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Header */}
+      <header className="max-w-7xl mx-auto flex justify-between items-center pb-6 border-b border-slate-800/80">
+        <div className="flex items-center gap-6">
+          <Link href="/" className="flex items-center gap-3">
+            <div className="w-3 h-3 rounded-full bg-sky-400 animate-pulse" />
+            <h1 className="text-xl font-bold tracking-wider text-sky-400">SEMANTIC ISR LAB</h1>
+            <span className="text-xs text-slate-500 font-mono">v2.4-thesis</span>
+          </Link>
+
+          <nav className="flex items-center gap-2 bg-slate-900/80 p-1 rounded-xl border border-slate-800 text-xs font-mono">
+            <Link
+              href="/"
+              className={`px-3 py-1.5 rounded-lg transition ${
+                pathname === '/' ? 'bg-sky-600 text-white font-semibold' : 'text-slate-400 hover:text-slate-200'
+              }`}
+            >
+              01. Gatekeeper Lab
+            </Link>
+            <Link
+              href="/analysis-hub"
+              className={`px-3 py-1.5 rounded-lg transition ${
+                pathname === '/analysis-hub' ? 'bg-sky-600 text-white font-semibold' : 'text-slate-400 hover:text-slate-200'
+              }`}
+            >
+              02. Analysis Hub
+            </Link>
+            <Link
+              href="/benchmark"
+              className={`px-3 py-1.5 rounded-lg transition ${
+                pathname === '/benchmark' ? 'bg-sky-600 text-white font-semibold' : 'text-slate-400 hover:text-slate-200'
+              }`}
+            >
+              03. 100-Prompt Benchmark
+            </Link>
+          </nav>
+        </div>
+
+        <div className="flex items-center gap-4">
+          <button
+            type="button"
+            onClick={() => setIsModalOpen(true)}
+            className="px-3.5 py-1.5 bg-slate-900 hover:bg-slate-800 border border-slate-700 text-sky-400 hover:text-sky-300 text-xs font-mono rounded-lg transition cursor-pointer flex items-center gap-1.5 shadow-md"
+          >
+            <span>🔑</span>
+            <span>{apiKey ? 'Key Configured' : 'API Gate Key'}</span>
+          </button>
+          <div className="px-3 py-1 bg-slate-900 border border-slate-800 rounded-lg text-right">
+            <span className="text-[10px] text-slate-500 block uppercase font-mono">Cloud Run</span>
+            <span className="text-xs font-bold text-emerald-400 font-mono">us-central1</span>
+          </div>
+        </div>
+      </header>
+
+      {/* Main Content Area */}
       <main className="max-w-7xl mx-auto grid grid-cols-1 lg:grid-cols-3 gap-6 mt-8">
-        {/* Left Section: Active Gatekeeper Live Flow */}
+        {/* Left Column */}
         <div className="lg:col-span-2 space-y-6">
           <div className="p-6 bg-slate-900/40 border border-slate-800/80 rounded-2xl backdrop-blur-sm">
             <div className="flex justify-between items-center mb-6">
@@ -113,7 +257,9 @@ export default function GatekeeperDashboard() {
                 <button
                   onClick={() => setEngine('cloud')}
                   className={`px-2.5 py-1 rounded text-xs font-mono transition ${
-                    engine === 'cloud' ? 'bg-sky-600 text-white font-bold' : 'bg-slate-950 text-slate-400 border border-slate-800'
+                    engine === 'cloud'
+                      ? 'bg-sky-600 text-white font-bold'
+                      : 'bg-slate-950 text-slate-400 border border-slate-800'
                   }`}
                 >
                   GCP Cloud Run
@@ -121,7 +267,9 @@ export default function GatekeeperDashboard() {
                 <button
                   onClick={() => setEngine('local')}
                   className={`px-2.5 py-1 rounded text-xs font-mono transition ${
-                    engine === 'local' ? 'bg-purple-600 text-white font-bold' : 'bg-slate-950 text-slate-400 border border-slate-800'
+                    engine === 'local'
+                      ? 'bg-purple-600 text-white font-bold'
+                      : 'bg-slate-950 text-slate-400 border border-slate-800'
                   }`}
                 >
                   Local Ollama
@@ -129,7 +277,7 @@ export default function GatekeeperDashboard() {
               </div>
             </div>
 
-            {/* Input query bar */}
+            {/* Prompt Input */}
             <div className="mb-6">
               <label className="text-[10px] uppercase text-slate-500 font-mono block mb-1.5">
                 Incoming Prompt Query
@@ -143,7 +291,7 @@ export default function GatekeeperDashboard() {
                   className="flex-1 bg-[#040711] border border-slate-800 rounded-xl px-4 py-2.5 text-xs font-mono text-slate-200 focus:outline-none focus:border-sky-500"
                 />
                 <button
-                  onClick={handleSimulate}
+                  onClick={handleExecuteQuery}
                   disabled={isLoading}
                   className="px-5 py-2.5 bg-sky-600 hover:bg-sky-500 disabled:opacity-50 text-white rounded-xl font-semibold text-xs font-mono transition"
                 >
@@ -209,10 +357,13 @@ export default function GatekeeperDashboard() {
                 Time to First Byte (TTFB)
               </span>
               <div className="text-4xl font-extrabold font-mono text-slate-100 mt-2">
-                {ttfb}<span className="text-sm font-normal text-slate-500 ml-1">ms</span>
+                {ttfb}
+                <span className="text-sm font-normal text-slate-500 ml-1">ms</span>
               </div>
               <p className="text-xs text-slate-400 mt-2">
-                {action === 'CACHE_HIT' ? '⚡ 22.8x faster via intent-aware cache' : '⏳ LLM cold start inference triggered'}
+                {action === 'CACHE_HIT'
+                  ? '⚡ 22.8x faster via intent-aware cache'
+                  : '⏳ LLM cold start inference triggered'}
               </p>
             </div>
 
@@ -226,7 +377,7 @@ export default function GatekeeperDashboard() {
           </div>
         </div>
 
-        {/* Right Section: Threshold Controls & Revalidation Logs */}
+        {/* Right Column */}
         <div className="space-y-6">
           <div className="p-6 bg-slate-900/40 border border-slate-800/80 rounded-2xl">
             <h2 className="text-sm font-semibold tracking-wide text-slate-300 mb-4">
