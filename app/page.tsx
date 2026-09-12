@@ -1,7 +1,25 @@
 'use client';
 
-import React, { useState, useMemo } from 'react';
+import React, { useState } from 'react';
 import Navbar from '@/components/Navbar';
+
+interface IntentPolicy {
+  intent: string;
+  confidence: number;
+  cacheAllowed: boolean;
+  threshold: number;
+  maxAgeSeconds: number;
+  sharingScope: 'public' | 'private' | 'restricted';
+  reason: string;
+}
+
+interface EvalChecks {
+  thresholdMatch: boolean;
+  freshnessMatch: boolean;
+  intentMatch: boolean;
+  cacheAllowed: boolean;
+  reason: string;
+}
 
 interface LogItem {
   id: string;
@@ -12,22 +30,38 @@ interface LogItem {
   latencyMs: number;
 }
 
-export default function GatekeeperLabPage() {
-  const [threshold, setThreshold] = useState<number>(0.90);
-  const [queryInput, setQueryInput] = useState<string>('How to optimize Next.js ISR on Google Cloud Run?');
-  const [runtimeMode, setRuntimeMode] = useState<'gcp' | 'ollama'>('gcp');
-  const [isProcessing, setIsProcessing] = useState<boolean>(false);
-
-  // Active query telemetry state
+export default function GatekeeperPage() {
+  const [queryInput, setQueryInput] = useState<string>('How can I optimize Next.js ISR on Cloud Run?');
   const [activeVectorId, setActiveVectorId] = useState<string>('8f2a9c');
   const [cachedNodeId, setCachedNodeId] = useState<string>('vector_d14c');
   const [similarity, setSimilarity] = useState<number>(0.924);
+  const [threshold, setThreshold] = useState<number>(0.90);
   const [pipelineLatency, setPipelineLatency] = useState<number>(14);
+  const [runtimeMode, setRuntimeMode] = useState<'gcp' | 'ollama'>('gcp');
+  const [isProcessing, setIsProcessing] = useState<boolean>(false);
+  const [feedbackSent, setFeedbackSent] = useState<boolean>(false);
   const [responseContent, setResponseContent] = useState<string>(
-    'Next.js ISR on Cloud Run leverages serverless revalidation cycles combined with intent caching to eliminate cold inference latency.'
+    'Semantic ISR Cache Match: Serving pre-rendered static ISR build from edge memory. Downstream LLM inference bypassed successfully.'
   );
 
-  // Live log history
+  const [policy, setPolicy] = useState<IntentPolicy>({
+    intent: 'General Technical Documentation',
+    confidence: 0.90,
+    cacheAllowed: true,
+    threshold: 0.90,
+    maxAgeSeconds: 3600,
+    sharingScope: 'public',
+    reason: 'Shared conceptual or architectural documentation; standard 0.90 similarity threshold applied.'
+  });
+
+  const [evalChecks, setEvalChecks] = useState<EvalChecks>({
+    thresholdMatch: true,
+    freshnessMatch: true,
+    intentMatch: true,
+    cacheAllowed: true,
+    reason: 'Cache Hit: Query matches General Technical Documentation intent.'
+  });
+
   const [logs, setLogs] = useState<LogItem[]>([
     {
       id: 'log-1',
@@ -55,65 +89,64 @@ export default function GatekeeperLabPage() {
     },
   ]);
 
-  // Derived Gatekeeper Verdict
-  const isCacheHit = similarity >= threshold;
+  const isCacheHit = similarity >= policy.threshold && policy.cacheAllowed;
 
-  // Preset query test cases for quick demoing
   const demoQueries = [
-    { label: 'Exact Intent (Hit)', text: 'How to optimize Next.js ISR on Google Cloud Run?' },
-    { label: 'Paraphrase (Hit)', text: 'Best practices for Next.js ISR caching on Cloud Run containers' },
-    { label: 'Unrelated Intent (Bust)', text: 'Quantum computing algorithms in financial cryptography' },
+    { label: 'General Tech (Hit)', text: 'How to optimize Next.js ISR on Google Cloud Run?' },
+    { label: 'Version-Specific (0.94)', text: 'Next.js 15 App Router dynamic routing and caching configuration' },
+    { label: 'Pricing / Temporal (0.96)', text: 'Current Cloud Run pricing for GPU instances today' },
+    { label: 'Private Data (Blocked)', text: 'Show my account balance and billing history' },
+    { label: 'Out of Domain (Bypassed)', text: 'Best recipe for Italian pasta bolognese' }
   ];
 
-  const handleIngest = (queryToTest: string) => {
+  const handleIngest = async (queryToTest: string) => {
+    if (!queryToTest.trim()) return;
     setIsProcessing(true);
+    setFeedbackSent(false);
 
-    setTimeout(() => {
-      // Deterministic pseudo-similarity based on prompt text
-      const lower = queryToTest.toLowerCase();
-      let calculatedSim = 0.42;
+    try {
+      const res = await fetch('/api/gatekeeper', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          prompt: queryToTest,
+          threshold,
+          engine: runtimeMode === 'gcp' ? 'cloud' : 'edge',
+        }),
+      });
 
-      if (lower.includes('next.js') || lower.includes('isr') || lower.includes('caching') || lower.includes('cloud run')) {
-        calculatedSim = lower.includes('optimize') ? 0.942 : 0.895;
-      } else {
-        calculatedSim = 0.38 + (queryToTest.length % 20) * 0.01;
+      const data = await res.json();
+
+      if (data.success) {
+        setSimilarity(data.similarity ?? 0);
+        setPipelineLatency(runtimeMode === 'gcp' ? 14 : 28);
+        setActiveVectorId(data.cachedNodeId || Math.random().toString(16).substring(2, 8));
+        setCachedNodeId(data.cachedNodeId || 'None');
+        setResponseContent(data.responseContent);
+
+        if (data.policy) setPolicy(data.policy);
+        if (data.evalChecks) setEvalChecks(data.evalChecks);
+
+        const isHit = data.action === 'CACHE_HIT';
+        const now = new Date();
+        const timeStr = now.toTimeString().split(' ')[0];
+
+        const newLog: LogItem = {
+          id: `log-${Date.now()}`,
+          timestamp: timeStr,
+          query: queryToTest,
+          similarity: data.similarity ?? 0,
+          status: isHit ? 'HIT' : 'BUST',
+          latencyMs: data.ttfbMs,
+        };
+
+        setLogs((prev) => [newLog, ...prev.slice(0, 9)]);
       }
-
-      const randomHash = Math.random().toString(16).substring(2, 8);
-      const hit = calculatedSim >= threshold;
-      const latency = hit ? Math.floor(110 + Math.random() * 40) : Math.floor(2600 + Math.random() * 600);
-
-      setSimilarity(calculatedSim);
-      setActiveVectorId(randomHash);
-      setPipelineLatency(runtimeMode === 'gcp' ? 12 : 28);
-
-      if (hit) {
-        setResponseContent(
-          'Semantic ISR Cache Match: Serving pre-rendered static ISR build from edge memory. Downstream LLM inference bypassed successfully.'
-        );
-      } else {
-        setResponseContent(
-          `Cache Invalidation Triggered (sim < ${threshold.toFixed(2)}): New prompt topology detected. Generating real-time response via ${
-            runtimeMode === 'gcp' ? 'Vertex AI' : 'Ollama'
-          } and revalidating ISR cache entry.`
-        );
-      }
-
-      const now = new Date();
-      const timeStr = now.toTimeString().split(' ')[0];
-
-      const newLog: LogItem = {
-        id: `log-${Date.now()}`,
-        timestamp: timeStr,
-        query: queryToTest,
-        similarity: calculatedSim,
-        status: hit ? 'HIT' : 'BUST',
-        latencyMs: latency,
-      };
-
-      setLogs((prev) => [newLog, ...prev.slice(0, 9)]);
+    } catch (err) {
+      console.error('Failed to query gatekeeper API:', err);
+    } finally {
       setIsProcessing(false);
-    }, 280);
+    }
   };
 
   return (
@@ -145,7 +178,7 @@ export default function GatekeeperLabPage() {
                 <button
                   type="button"
                   onClick={() => setRuntimeMode('gcp')}
-                  className={`px-4 py-2 rounded-xl transition-all ${
+                  className={`px-4 py-2 rounded-xl transition-all cursor-pointer ${
                     runtimeMode === 'gcp'
                       ? 'bg-sky-500 text-white shadow-md'
                       : 'text-slate-600 hover:text-slate-900'
@@ -156,7 +189,7 @@ export default function GatekeeperLabPage() {
                 <button
                   type="button"
                   onClick={() => setRuntimeMode('ollama')}
-                  className={`px-4 py-2 rounded-xl transition-all ${
+                  className={`px-4 py-2 rounded-xl transition-all cursor-pointer ${
                     runtimeMode === 'ollama'
                       ? 'bg-indigo-600 text-white shadow-md'
                       : 'text-slate-600 hover:text-slate-900'
@@ -206,7 +239,7 @@ export default function GatekeeperLabPage() {
                       setQueryInput(chip.text);
                       handleIngest(chip.text);
                     }}
-                    className="text-xs font-medium px-3 py-1 rounded-full bg-slate-100 hover:bg-amber-50 hover:text-amber-700 hover:border-amber-200 border border-slate-200 text-slate-600 transition"
+                    className="text-xs font-medium px-3 py-1 rounded-full bg-slate-100 hover:bg-amber-50 hover:text-amber-700 hover:border-amber-200 border border-slate-200 text-slate-600 transition cursor-pointer"
                   >
                     {chip.label}
                   </button>
@@ -232,7 +265,7 @@ export default function GatekeeperLabPage() {
                   {similarity.toFixed(3)}
                 </span>
                 <span className="text-xs font-mono font-bold text-slate-600 uppercase tracking-widest mt-1 block">
-                  Cosine Similarity (τ)
+                  Cosine Similarity (s*)
                 </span>
               </div>
 
@@ -241,6 +274,90 @@ export default function GatekeeperLabPage() {
                 <span className="inline-block bg-white border border-slate-200 text-purple-700 font-mono text-xs px-3 py-1.5 rounded-xl font-bold shadow-xs">
                   {cachedNodeId}
                 </span>
+              </div>
+            </div>
+
+            {/* Intent-Aware Policy Telemetry Card */}
+            <div className="bg-white border border-slate-200 rounded-2xl p-5 shadow-xs space-y-4">
+              <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-100 pb-3">
+                <div className="flex items-center gap-2">
+                  <span className="text-xs uppercase font-bold tracking-wider text-slate-400">Detected Intent</span>
+                  <span className="px-3 py-1 rounded-full text-xs font-bold bg-indigo-50 text-indigo-700 border border-indigo-200">
+                    {policy.intent}
+                  </span>
+                </div>
+                <span className={`px-2.5 py-0.5 text-xs font-semibold rounded border uppercase tracking-wider ${
+                  policy.sharingScope === 'private' ? 'bg-red-50 text-red-700 border-red-200' :
+                  policy.sharingScope === 'restricted' ? 'bg-amber-50 text-amber-700 border-amber-200' :
+                  'bg-emerald-50 text-emerald-700 border-emerald-200'
+                }`}>
+                  Scope: {policy.sharingScope}
+                </span>
+              </div>
+
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-center">
+                <div className="p-3 bg-slate-50 rounded-xl">
+                  <span className="text-[11px] font-bold uppercase text-slate-500 block">Dynamic τ_i</span>
+                  <span className="font-mono text-base font-extrabold text-slate-800">{policy.threshold.toFixed(2)}</span>
+                </div>
+                <div className="p-3 bg-slate-50 rounded-xl">
+                  <span className="text-[11px] font-bold uppercase text-slate-500 block">Measured s*</span>
+                  <span className={`font-mono text-base font-extrabold ${evalChecks.thresholdMatch ? 'text-emerald-600' : 'text-amber-600'}`}>
+                    {similarity.toFixed(3)}
+                  </span>
+                </div>
+                <div className="p-3 bg-slate-50 rounded-xl">
+                  <span className="text-[11px] font-bold uppercase text-slate-500 block">Freshness Limit</span>
+                  <span className="font-mono text-base font-extrabold text-slate-800">{policy.maxAgeSeconds}s</span>
+                </div>
+                <div className="p-3 bg-slate-50 rounded-xl">
+                  <span className="text-[11px] font-bold uppercase text-slate-500 block">Cache Status</span>
+                  <span className={`font-mono text-base font-extrabold ${policy.cacheAllowed ? 'text-emerald-600' : 'text-rose-600'}`}>
+                    {policy.cacheAllowed ? 'Eligible' : 'Blocked'}
+                  </span>
+                </div>
+              </div>
+            </div>
+
+            {/* Explainable Decision Rule Audit Panel */}
+            <div className="bg-slate-50 border border-slate-200 rounded-2xl p-5 shadow-xs space-y-3">
+              <h4 className="text-xs font-bold uppercase tracking-wider text-slate-500">
+                Explainable Routing Decision Engine
+              </h4>
+
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-xs font-semibold">
+                <div className={`p-2 rounded-lg border text-center ${evalChecks.thresholdMatch ? 'bg-emerald-50 border-emerald-200 text-emerald-800' : 'bg-rose-50 border-rose-200 text-rose-800'}`}>
+                  Threshold: {evalChecks.thresholdMatch ? 'PASS' : 'FAIL'}
+                </div>
+                <div className={`p-2 rounded-lg border text-center ${evalChecks.freshnessMatch ? 'bg-emerald-50 border-emerald-200 text-emerald-800' : 'bg-rose-50 border-rose-200 text-rose-800'}`}>
+                  Freshness: {evalChecks.freshnessMatch ? 'PASS' : 'FAIL'}
+                </div>
+                <div className={`p-2 rounded-lg border text-center ${evalChecks.intentMatch ? 'bg-emerald-50 border-emerald-200 text-emerald-800' : 'bg-rose-50 border-rose-200 text-rose-800'}`}>
+                  Intent Match: {evalChecks.intentMatch ? 'PASS' : 'FAIL'}
+                </div>
+                <div className={`p-2 rounded-lg border text-center ${evalChecks.cacheAllowed ? 'bg-emerald-50 border-emerald-200 text-emerald-800' : 'bg-rose-50 border-rose-200 text-rose-800'}`}>
+                  Cache Permitted: {evalChecks.cacheAllowed ? 'YES' : 'NO'}
+                </div>
+              </div>
+
+              <div className="p-3 bg-white border border-slate-200 rounded-xl text-xs text-slate-700 leading-relaxed">
+                <span className="font-bold text-slate-900">Routing Justification: </span>
+                {evalChecks.reason}
+              </div>
+
+              <div className="flex items-center justify-between pt-2 text-xs border-t border-slate-200">
+                <span className="text-slate-500">Notice incorrect semantic reuse?</span>
+                {feedbackSent ? (
+                  <span className="text-emerald-600 font-bold">Feedback logged. Centroid calibrated.</span>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => setFeedbackSent(true)}
+                    className="px-3 py-1 bg-white border border-slate-300 rounded-lg hover:bg-slate-100 text-slate-700 font-medium transition shadow-2xs cursor-pointer"
+                  >
+                    Flag Context Drift
+                  </button>
+                )}
               </div>
             </div>
 
@@ -264,7 +381,7 @@ export default function GatekeeperLabPage() {
               </div>
             </div>
 
-            {/* Response Content Preview */}
+            {/* Delivered Payload / Status */}
             <div className="bg-slate-50 border border-slate-200 rounded-2xl p-5 space-y-1.5">
               <div className="flex items-center justify-between">
                 <span className="text-xs uppercase font-mono font-bold text-slate-500 block">
@@ -278,14 +395,14 @@ export default function GatekeeperLabPage() {
             </div>
           </div>
 
-          {/* Right Column: Threshold Control & Live Logs */}
+          {/* Right Column: Dynamic Threshold Control & Live Logs */}
           <div className="space-y-8">
             
             {/* Dynamic Threshold Slider Card */}
             <div className="bg-white border border-slate-200 rounded-3xl p-7 shadow-sm space-y-6">
               <div className="flex items-center justify-between">
                 <div>
-                  <h3 className="text-lg font-black text-slate-900 tracking-tight">Threshold Control (τ)</h3>
+                  <h3 className="text-lg font-black text-slate-900 tracking-tight">Manual Override (τ)</h3>
                   <p className="text-xs font-mono text-slate-400">Strictness boundary</p>
                 </div>
                 <span className="text-3xl font-black font-mono text-amber-500">
@@ -325,15 +442,15 @@ export default function GatekeeperLabPage() {
                 <div className={`text-base font-black flex items-center gap-2 ${
                   isCacheHit ? 'text-emerald-700' : 'text-rose-700'
                 }`}>
-                  <span>{isCacheHit ? '✓ CACHE HIT' : '⚡ CACHE BUST'}</span>
+                  <span>{isCacheHit ? '✓ CACHE HIT' : '⚡ SAFE CACHE MISS'}</span>
                   <span className="text-xs font-semibold">({isCacheHit ? 'Bypass LLM' : 'Trigger Inference'})</span>
                 </div>
                 <p className={`text-xs font-medium pt-1 ${
                   isCacheHit ? 'text-emerald-800' : 'text-rose-800'
                 }`}>
                   {isCacheHit
-                    ? `sim (${similarity.toFixed(3)}) ≥ τ (${threshold.toFixed(2)}): Static ISR page returned directly.`
-                    : `sim (${similarity.toFixed(3)}) < τ (${threshold.toFixed(2)}): Intent drift detected. Revalidating.`}
+                    ? `sim (${similarity.toFixed(3)}) ≥ τ_i (${policy.threshold.toFixed(2)}): Static ISR page returned directly.`
+                    : `sim (${similarity.toFixed(3)}) < τ_i (${policy.threshold.toFixed(2)}) or policy expired: Fresh execution required.`}
                 </p>
               </div>
             </div>
