@@ -1,6 +1,8 @@
-import { NextRequest, NextResponse } from 'next/server';
+﻿import { NextRequest, NextResponse } from 'next/server';
 import { calculateCosineSimilarity } from '@/lib/similarity/cosine-sim';
 import { evaluateIntentPolicy, IntentPolicy } from '@/lib/intentPolicy';
+
+export const runtime = 'nodejs';
 
 interface CachedNode {
   id: string;
@@ -11,15 +13,7 @@ interface CachedNode {
   intent: string;
 }
 
-let isrNodeCache: CachedNode = {
-  id: 'vector_d14c',
-  prompt: 'How to optimize Next.js ISR on Google Cloud Run?',
-  embedding: Array.from({ length: 768 }, (_, i) => Math.sin(i * 0.1)),
-  renderedContent: 'Next.js ISR on Cloud Run leverages serverless revalidation cycles combined with intent caching to reduce cold inference taxes.',
-  timestamp: Date.now() - 120000, // Pre-seeded 2 minutes ago
-  intent: 'General Technical Documentation'
-};
-
+// Deterministic unit-normalized 768-dim vector generator
 function generateDeterministicEmbedding(text: string): number[] {
   const embedding = new Array(768).fill(0);
   for (let i = 0; i < text.length; i++) {
@@ -27,10 +21,60 @@ function generateDeterministicEmbedding(text: string): number[] {
     embedding[i % 768] += charCode * Math.cos(i);
   }
   const norm = Math.sqrt(embedding.reduce((sum, val) => sum + val * val, 0));
-  return norm === 0 ? embedding : embedding.map(val => val / norm);
+  return norm === 0 ? embedding : embedding.map((val) => val / norm);
+}
+
+// 30 Baseline Centroids matching Appendix A.1
+const initialCentroids: { id: string; prompt: string; intent: string }[] = [
+  { id: "vec_d01", prompt: "How do I optimize Next.js ISR on Cloud Run?", intent: "General Technical Documentation" },
+  { id: "vec_d02", prompt: "What is the fastest way to deploy Next.js containers?", intent: "General Technical Documentation" },
+  { id: "vec_d03", prompt: "How does stale-while-revalidate work in RFC 5861?", intent: "General Technical Documentation" },
+  { id: "vec_d04", prompt: "How to configure Google Cloud Secret Manager?", intent: "General Technical Documentation" },
+  { id: "vec_d05", prompt: "How do I reduce Docker container size for Next.js?", intent: "General Technical Documentation" },
+  { id: "vec_d06", prompt: "What are React Server Components in Next.js 15?", intent: "General Technical Documentation" },
+  { id: "vec_d07", prompt: "How does Cloud Run scale to zero when idle?", intent: "General Technical Documentation" },
+  { id: "vec_d08", prompt: "How to set memory limits on Google Cloud Run?", intent: "General Technical Documentation" },
+  { id: "vec_d09", prompt: "What is cosine similarity in high-dimensional vector spaces?", intent: "General Technical Documentation" },
+  { id: "vec_d10", prompt: "How does L2 normalization simplify dot products?", intent: "General Technical Documentation" },
+  { id: "vec_d11", prompt: "How to handle cold starts on serverless containers?", intent: "General Technical Documentation" },
+  { id: "vec_d12", prompt: "Explain Time to First Byte in web applications.", intent: "General Technical Documentation" },
+  { id: "vec_d13", prompt: "What is the difference between SSG and SSR?", intent: "General Technical Documentation" },
+  { id: "vec_d14", prompt: "How to configure multi-stage Docker builds?", intent: "General Technical Documentation" },
+  { id: "vec_d15", prompt: "How does Next.js standalone output tracing work?", intent: "General Technical Documentation" },
+  { id: "vec_d16", prompt: "What is the dimension of Vertex AI text-embedding-004?", intent: "General Technical Documentation" },
+  { id: "vec_d17", prompt: "How does SIMD parallelize matrix multiplications?", intent: "General Technical Documentation" },
+  { id: "vec_d18", prompt: "Explain Cache-Control max-age header behavior.", intent: "General Technical Documentation" },
+  { id: "vec_d19", prompt: "How to deploy Cloud Run in europe-west3?", intent: "General Technical Documentation" },
+  { id: "vec_d20", prompt: "What is the purpose of an Active Neural Gatekeeper?", intent: "General Technical Documentation" },
+  { id: "vec_d21", prompt: "How to prevent cross-tenant data leakage in caches?", intent: "General Technical Documentation" },
+  { id: "vec_d22", prompt: "What is an acceptance basin on a hypersphere?", intent: "General Technical Documentation" },
+  { id: "vec_d23", prompt: "How does Next.js handle client-side route navigation?", intent: "General Technical Documentation" },
+  { id: "vec_d24", prompt: "What are the concurrency limits on Cloud Run?", intent: "General Technical Documentation" },
+  { id: "vec_d25", prompt: "How to configure Tailwind CSS v4 in Next.js?", intent: "General Technical Documentation" },
+  { id: "vec_d26", prompt: "Explain the difference between HNSW and flat vector search.", intent: "General Technical Documentation" },
+  { id: "vec_d27", prompt: "How to benchmark Time to First Byte with curl?", intent: "General Technical Documentation" },
+  { id: "vec_d28", prompt: "What is the purpose of Float32Array in Node.js?", intent: "General Technical Documentation" },
+  { id: "vec_d29", prompt: "How to handle CORS headers in Next.js Route Handlers?", intent: "General Technical Documentation" },
+  { id: "vec_d30", prompt: "Explain semantic drift in vector retrieval systems.", intent: "General Technical Documentation" }
+];
+
+// Pre-seed the multi-entry in-memory store
+const centroidStore: CachedNode[] = initialCentroids.map((c) => ({
+  id: c.id,
+  prompt: c.prompt,
+  embedding: generateDeterministicEmbedding(c.prompt),
+  renderedContent: `[Pre-rendered ISR Payload]: Static documentation response for "${c.prompt}".`,
+  timestamp: Date.now() - 60000, // Seeded 1 hour ago (well within freshness window)
+  intent: c.intent
+}));
+
+function normalizeText(text: string): string {
+  return text.trim().toLowerCase().replace(/[^\w\s]/gi, '');
 }
 
 export async function POST(req: NextRequest) {
+  const requestStartTime = performance.now();
+
   try {
     const body = await req.json();
     const { prompt, threshold: clientThreshold, engine = 'cloud' } = body;
@@ -39,22 +83,62 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'Prompt string is required' }, { status: 400 });
     }
 
-    // 1. Evaluate Intent-Aware Policy Layer (sub-millisecond)
-    const policy: IntentPolicy = evaluateIntentPolicy(prompt);
+    // 1. Fast-Path: In-Memory Exact Lexical Match
+    const cleanPrompt = normalizeText(prompt);
+    const exactMatch = centroidStore.find((c) => normalizeText(c.prompt) === cleanPrompt);
 
-    // Dynamic threshold: use policy-prescribed threshold unless manually overridden
+    if (exactMatch) {
+      const durationMs = Math.round(performance.now() - requestStartTime);
+      return NextResponse.json({
+        success: true,
+        action: 'CACHE_HIT',
+        decision: {
+          isHit: true,
+          action: 'CACHE_HIT',
+          latencyMs: durationMs,
+          costUsd: 0.0,
+        },
+        policy: {
+          intent: exactMatch.intent,
+          confidence: 1.0,
+          cacheAllowed: true,
+          threshold: 1.0,
+          maxAgeSeconds: 86400,
+          sharingScope: 'public',
+          reason: 'Verbatim string match detected; bypassed embedding projection.',
+        },
+        evalChecks: {
+          thresholdMatch: true,
+          freshnessMatch: true,
+          intentMatch: true,
+          cacheAllowed: true,
+          reason: 'Exact lexical match bypass.',
+        },
+        similarity: 1.0,
+        effectiveThreshold: 1.0,
+        ttfbMs: durationMs,
+        cachedNodeId: exactMatch.id,
+        cachedPrompt: exactMatch.prompt,
+        responseContent: exactMatch.renderedContent,
+        timestamp: new Date().toLocaleTimeString(),
+      });
+    }
+
+    // 2. Intent-Aware Policy Layer Evaluation
+    const policy: IntentPolicy = evaluateIntentPolicy(prompt);
     const effectiveThreshold = clientThreshold !== undefined ? Number(clientThreshold) : policy.threshold;
 
-    // 2. Early Guard: Private User Data or Out-of-Domain Blocked Requests
+    // 3. Security Guard: Private Data / Scope Blocking
     if (!policy.cacheAllowed) {
+      const durationMs = Math.round(performance.now() - requestStartTime);
       return NextResponse.json({
         success: true,
         action: 'POLICY_BLOCKED',
         decision: {
           isHit: false,
           action: 'POLICY_BLOCKED',
-          latencyMs: engine === 'cloud' ? 3120 : 1850,
-          costUsd: 0.0082,
+          latencyMs: durationMs,
+          costUsd: 0.0,
         },
         policy,
         evalChecks: {
@@ -64,69 +148,76 @@ export async function POST(req: NextRequest) {
           cacheAllowed: false,
           reason: policy.reason,
         },
-        similarity: 0,
+        similarity: 0.0,
         effectiveThreshold,
-        ttfbMs: 148,
+        ttfbMs: durationMs,
         cachedNodeId: null,
         cachedPrompt: null,
         responseContent: `[Direct Execution Enforced - Shared Cache Bypassed]: ${policy.reason}`,
-        timestamp: new Date().toLocaleTimeString()
+        timestamp: new Date().toLocaleTimeString(),
       });
     }
 
-    // 3. Vectorization and Proximity Scanning
+    // 4. Vector Projection
     const incomingEmbedding = generateDeterministicEmbedding(prompt);
-    const similarity = calculateCosineSimilarity(incomingEmbedding, isrNodeCache.embedding);
 
-    // 4. Multi-Predicate Composite Decision Rule
-    // CacheHit = (s* >= tau_i) AND (age <= T_i) AND (intentMatch = true) AND (cacheAllowed = true)
-    const cachedAgeSeconds = Math.round((Date.now() - isrNodeCache.timestamp) / 1000);
-    const thresholdMatch = similarity >= effectiveThreshold;
+    // 5. In-Memory Exhaustive Sweep across all centroids
+    let bestSimilarity = -1;
+    let bestCandidate: CachedNode = centroidStore[0];
+
+    for (const node of centroidStore) {
+      const sim = calculateCosineSimilarity(incomingEmbedding, node.embedding);
+      if (sim > bestSimilarity) {
+        bestSimilarity = sim;
+        bestCandidate = node;
+      }
+    }
+
+    // 6. Multi-Predicate Composite Decision Rule
+    const cachedAgeSeconds = Math.round((Date.now() - bestCandidate.timestamp) / 1000);
+    const thresholdMatch = bestSimilarity >= effectiveThreshold;
     const freshnessMatch = cachedAgeSeconds <= policy.maxAgeSeconds;
-    const intentMatch = isrNodeCache.intent === policy.intent;
+    const intentMatch = bestCandidate.intent === policy.intent;
     const cacheAllowed = policy.cacheAllowed;
 
     const isHit = thresholdMatch && freshnessMatch && intentMatch && cacheAllowed;
 
     let routingReason = '';
     if (isHit) {
-      routingReason = `Cache Hit: Query matches [${policy.intent}]. Similarity (${similarity.toFixed(3)}) >= ${effectiveThreshold} and cache age (${cachedAgeSeconds}s) <= ${policy.maxAgeSeconds}s limit.`;
+      routingReason = `Cache Hit: Query matches [${policy.intent}]. Similarity (${bestSimilarity.toFixed(3)}) >= ${effectiveThreshold} and cache age (${cachedAgeSeconds}s) <= ${policy.maxAgeSeconds}s limit.`;
     } else if (!freshnessMatch) {
       routingReason = `Safe Cache Miss: Freshness limit expired. Cached asset is ${cachedAgeSeconds}s old (ceiling: ${policy.maxAgeSeconds}s). Fresh revalidation scheduled.`;
     } else if (!thresholdMatch) {
-      routingReason = `Safe Cache Miss: Cosine similarity (${similarity.toFixed(3)}) fell below required policy threshold (${effectiveThreshold}). Provisional delivery served while revalidating.`;
+      routingReason = `Safe Cache Miss: Cosine similarity (${bestSimilarity.toFixed(3)}) fell below required policy threshold (${effectiveThreshold}). Provisional delivery served while revalidating.`;
     } else if (!intentMatch) {
-      routingReason = `Safe Cache Miss: Intent mismatch. Query classified as [${policy.intent}] but cached centroid serves [${isrNodeCache.intent}].`;
+      routingReason = `Safe Cache Miss: Intent mismatch. Query classified as [${policy.intent}] but cached centroid serves [${bestCandidate.intent}].`;
     }
 
-    let ttfbMs: number;
     let responseText: string;
-
     if (isHit) {
-      ttfbMs = 140;
-      responseText = isrNodeCache.renderedContent;
+      responseText = bestCandidate.renderedContent;
     } else {
-      ttfbMs = engine === 'cloud' ? 3120 : 1850;
       responseText = `[Fresh Inference Generated via ${engine.toUpperCase()}]: Cache revalidated for query: "${prompt}".`;
-
-      // Atomically overwrite centroid with fresh intent and timestamp
-      isrNodeCache = {
+      // Push new entry dynamically into store
+      centroidStore.push({
         id: `vector_${Math.random().toString(36).substring(2, 6)}`,
         prompt,
         embedding: incomingEmbedding,
         renderedContent: responseText,
         timestamp: Date.now(),
-        intent: policy.intent
-      };
+        intent: policy.intent,
+      });
     }
+
+    const durationMs = Math.round(performance.now() - requestStartTime);
 
     return NextResponse.json({
       success: true,
-      action: isHit ? 'CACHE_HIT' : 'SAFE_CACHE_MISS',
+      action: isHit ? 'CACHE_HIT' : 'SAFE_MISS',
       decision: {
         isHit,
-        action: isHit ? 'CACHE_HIT' : 'SAFE_CACHE_MISS',
-        latencyMs: isHit ? 140 : 3120,
+        action: isHit ? 'CACHE_HIT' : 'SAFE_MISS',
+        latencyMs: durationMs,
         costUsd: isHit ? 0.0 : 0.0082,
       },
       policy,
@@ -137,18 +228,24 @@ export async function POST(req: NextRequest) {
         cacheAllowed,
         reason: routingReason,
       },
-      similarity: Number(similarity.toFixed(3)),
+      similarity: Number(bestSimilarity.toFixed(3)),
       effectiveThreshold,
-      cachedAgeSeconds,
-      ttfbMs,
-      cachedNodeId: isrNodeCache.id,
-      cachedPrompt: isrNodeCache.prompt,
+      ttfbMs: durationMs,
+      cachedNodeId: isHit ? bestCandidate.id : null,
+      cachedPrompt: isHit ? bestCandidate.prompt : null,
       responseContent: responseText,
-      timestamp: new Date().toLocaleTimeString()
+      timestamp: new Date().toLocaleTimeString(),
     });
-  } catch (error) {
+
+  } catch (error: unknown) {
+    const durationMs = Math.round(performance.now() - requestStartTime);
+    const msg = error instanceof Error ? error.message : 'Processing failed';
     return NextResponse.json(
-      { error: 'Gatekeeper execution failed', details: (error as Error).message },
+      {
+        success: false,
+        error: msg,
+        ttfbMs: durationMs,
+      },
       { status: 500 }
     );
   }
